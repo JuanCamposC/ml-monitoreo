@@ -37,7 +37,13 @@ app.add_middleware(
 
 # Inicializar componentes
 mongo_client = MongoDBClient()
-perceptron_model = PerceptronTimeSeries()
+
+# Modelos separados para cada parámetro
+models = {
+    'temperatura': PerceptronTimeSeries(),
+    'ph': PerceptronTimeSeries(),
+    'oxigeno': PerceptronTimeSeries()
+}
 
 # Modelos Pydantic para request/response
 class TimeSeriesData(BaseModel):
@@ -119,9 +125,9 @@ async def health_check():
     try:
         db_status = await mongo_client.ping()
         return {
-            "status": "healthy",
+            "status": "healthy",  
             "database": "connected" if db_status else "disconnected",
-            "model_loaded": perceptron_model.is_trained
+            "models_loaded": {param: model.is_trained for param, model in models.items()}
         }
     except Exception as e:
         return {
@@ -161,8 +167,11 @@ async def train_model(request: TrainingRequest):
         
         logger.info(f"Datos obtenidos: {len(data)} registros")
         
-        # Entrenar modelo
-        metrics = perceptron_model.train(
+        # Entrenar modelo específico para este parámetro
+        if request.parameter not in models:
+            raise HTTPException(status_code=400, detail=f"Parámetro no válido: {request.parameter}")
+            
+        metrics = models[request.parameter].train(
             data=data,
             window_size=request.window_size,
             epochs=request.epochs
@@ -201,7 +210,7 @@ async def predict(request: PredictionRequest):
             )
         
         # Verificar que el modelo esté entrenado para este parámetro
-        if not perceptron_model.is_trained:
+        if not models[request.parameter].is_trained:
             raise HTTPException(
                 status_code=400, 
                 detail=f"El modelo para '{request.parameter}' no está entrenado. Usa /train primero."
@@ -239,7 +248,7 @@ async def predict(request: PredictionRequest):
         # Hacer predicción
         values = [float(item['value']) for item in prediction_data]
         
-        prediction, confidence = perceptron_model.predict(
+        prediction, confidence = models[request.parameter].predict(
             values,
             return_confidence=True
         )
@@ -262,7 +271,7 @@ async def predict(request: PredictionRequest):
             },
             model_info={
                 "window_size": window_size,
-                "metrics": perceptron_model.get_metrics()
+                "metrics": models[request.parameter].get_metrics()
             },
             timestamp=datetime.now().isoformat()
         )
@@ -275,18 +284,23 @@ async def predict(request: PredictionRequest):
 
 @app.get("/model/info")
 async def get_model_info():
-    """Obtener información del modelo actual"""
+    """Obtener información de todos los modelos"""
     return {
-        "is_trained": perceptron_model.is_trained,
-        "metrics": perceptron_model.get_metrics(),
-        "parameters": perceptron_model.get_parameters()
+        "models": {
+            param: {
+                "is_trained": model.is_trained,
+                "metrics": model.get_metrics(),
+                "parameters": model.get_parameters()
+            } for param, model in models.items()
+        }
     }
 
 @app.post("/model/reset")
 async def reset_model():
-    """Reiniciar el modelo"""
-    perceptron_model.reset()
-    return {"status": "success", "message": "Modelo reiniciado"}
+    """Reiniciar todos los modelos"""
+    for model in models.values():
+        model.reset()
+    return {"status": "success", "message": "Todos los modelos reiniciados"}
 
 @app.get("/collections")
 async def list_collections():
@@ -383,11 +397,10 @@ async def train_all_parameters(request: TrainAllRequest):
                 if parameter in all_data and len(all_data[parameter]) >= 5:
                     logger.info(f"Entrenando modelo para {parameter} con {len(all_data[parameter])} registros")
                     
-                    metrics = perceptron_model.train(
+                    metrics = models[parameter].train(
                         data=all_data[parameter],
                         window_size=request.window_size,
-                        epochs=request.epochs,
-                        parameter=parameter
+                        epochs=request.epochs
                     )
                     
                     results[parameter] = {
@@ -442,7 +455,7 @@ async def predict_all_parameters(request: PredictAllRequest):
         for parameter in parameters:
             try:
                 # Verificar que el modelo esté entrenado
-                if not perceptron_model.is_trained:
+                if not models[parameter].is_trained:
                     predictions[parameter] = {
                         "success": False,
                         "error": f"Modelo no entrenado para {parameter}",
@@ -470,7 +483,7 @@ async def predict_all_parameters(request: PredictAllRequest):
                 prediction_data = recent_data[-window_size:]
                 values = [float(item['value']) for item in prediction_data]
                 
-                prediction, confidence = perceptron_model.predict(
+                prediction, confidence = models[parameter].predict(
                     values,
                     return_confidence=True
                 )
