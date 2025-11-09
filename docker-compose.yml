@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  ml-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=${MONGODB_URL}
+      - MONGODB_DATABASE=${MONGODB_DATABASE}
+      - PORT=8000
+      - ENVIRONMENT=development
+    volumes:
+      - ./models/saved_model.pkl:/app/models/saved_model.pkl
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
