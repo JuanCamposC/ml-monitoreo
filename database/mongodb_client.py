@@ -126,7 +126,7 @@ class MongoDBClient:
                     date_filter[sort_field]["$lte"] = end_date
             
             # Construir query
-            cursor = collection.find(date_filter).sort(sort_field, 1)
+            cursor = collection.find(date_filter).sort(sort_field, -1)
             
             if limit:
                 cursor = cursor.limit(limit)
