@@ -385,9 +385,12 @@ async def test_database_connection():
 
 @app.get("/data/sample/{collection_name}")
 async def get_sample_data(collection_name: str, limit: int = 10):
-    """Obtener datos de muestra de una colección para visualizar estructura"""
+    """Obtener muestra de los últimos 10 datos (exactamente los que usa para entrenamiento)"""
     try:
-        # Obtener muestra de cada parámetro
+        # Forzar limit a 10 para mostrar exactamente los datos que usa el entrenamiento
+        training_limit = 10
+        
+        # Obtener exactamente los últimos 10 datos de cada parámetro
         sample_data = {}
         parameters = ['temperatura', 'ph', 'oxigeno']
         
@@ -395,16 +398,22 @@ async def get_sample_data(collection_name: str, limit: int = 10):
             data = await mongo_client.get_time_series_data(
                 collection_name=collection_name,
                 parameter=param,
-                limit=limit
+                limit=training_limit
             )
             sample_data[param] = data
         
         return {
             "status": "success",
             "collection": collection_name,
-            "sample_size": limit,
+            "sample_size": training_limit,
             "data": sample_data,
-            "total_records": {param: len(data) for param, data in sample_data.items()}
+            "total_records": {param: len(data) for param, data in sample_data.items()},
+            "note": "Estos son exactamente los últimos 10 datos que usa el entrenamiento",
+            "training_info": {
+                "data_used_for_training": training_limit,
+                "window_size_default": 5,
+                "sequences_created_per_param": max(0, training_limit - 5)
+            }
         }
         
     except Exception as e:
@@ -421,10 +430,10 @@ async def train_all_parameters(request: TrainAllRequest):
         if not await mongo_client.ping():
             raise HTTPException(status_code=500, detail="No se puede conectar a MongoDB")
         
-        # Obtener datos para todos los parámetros
+        # Obtener solo los últimos 10 datos para entrenamiento
         all_data = await mongo_client.get_all_parameters_data(
             collection_name=request.collection_name,
-            limit=request.limit
+            limit=10  # Usar solo los últimos 10 registros
         )
         
         if not all_data:
@@ -464,10 +473,12 @@ async def train_all_parameters(request: TrainAllRequest):
                     results[parameter] = {
                         "success": True,
                         "data_stats": data_stats,
+                        "training_data_used": all_data[parameter],  # Mostrar exactamente qué datos usó
                         "training_config": {
                             "window_size": request.window_size,
                             "epochs": request.epochs,
-                            "sequences_created": metrics.get("training_samples", 0)
+                            "sequences_created": metrics.get("training_samples", 0),
+                            "limit_applied": 10
                         },
                         "performance_metrics": {
                             "mae": metrics.get("mae", 0),

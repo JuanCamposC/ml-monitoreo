@@ -125,7 +125,7 @@ class MongoDBClient:
                 if end_date:
                     date_filter[sort_field]["$lte"] = end_date
             
-            # Construir query
+            # Construir query - ordenar por fecha descendente para obtener los más recientes primero
             cursor = collection.find(date_filter).sort(sort_field, -1)
             
             if limit:
