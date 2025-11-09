@@ -29,26 +29,36 @@ class MongoDBClient:
     async def connect(self):
         """Establecer conexión con MongoDB"""
         try:
+            logger.info(f"Conectando a MongoDB: {self.mongodb_url[:50]}...")
+            
+            # Aumentar timeouts para servicios cloud
             self.client = AsyncIOMotorClient(
                 self.mongodb_url,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000,
-                socketTimeoutMS=5000,
-                maxPoolSize=10,
-                minPoolSize=1
+                serverSelectionTimeoutMS=30000,  # 30 segundos
+                connectTimeoutMS=30000,          # 30 segundos  
+                socketTimeoutMS=30000,           # 30 segundos
+                maxPoolSize=10,                  # Pool de conexiones
+                retryWrites=True,                # Reintentar escrituras
+                retryReads=True                  # Reintentar lecturas
             )
             
-            # Verificar conexión
-            await self.client.admin.command('ping')
+            # Verificar conexión con timeout extendido
+            await asyncio.wait_for(
+                self.client.admin.command('ping'), 
+                timeout=30.0
+            )
+            
             self.database = self.client[self.database_name]
+            logger.info(f"✅ Conectado exitosamente a MongoDB: {self.database_name}")
             
-            logger.info(f"Conectado a MongoDB: {self.database_name}")
-            
+        except asyncio.TimeoutError:
+            logger.error("❌ Timeout conectando a MongoDB (30s)")
+            raise ConnectionFailure("Timeout de conexión a MongoDB")
         except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-            logger.error(f"Error conectando a MongoDB: {e}")
+            logger.error(f"❌ Error conectando a MongoDB: {e}")
             raise
         except Exception as e:
-            logger.error(f"Error inesperado al conectar: {e}")
+            logger.error(f"❌ Error inesperado conectando a MongoDB: {e}")
             raise
     
     async def close(self):
@@ -62,12 +72,19 @@ class MongoDBClient:
         try:
             if not self.client:
                 return False
-            
-            await self.client.admin.command('ping')
+                
+            # Ping con timeout extendido
+            await asyncio.wait_for(
+                self.client.admin.command('ping'),
+                timeout=20.0
+            )
             return True
             
+        except asyncio.TimeoutError:
+            logger.error("Timeout en ping a MongoDB")
+            return False
         except Exception as e:
-            logger.error(f"Error en ping MongoDB: {e}")
+            logger.error(f"Error en ping a MongoDB: {e}")
             return False
     
     async def get_time_series_data(

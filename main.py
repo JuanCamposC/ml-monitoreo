@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import logging
 import numpy as np
 from datetime import datetime
+import asyncio
 
 from models.perceptron_model import PerceptronTimeSeries
 from database.mongodb_client import MongoDBClient
@@ -67,13 +68,27 @@ class TrainAllRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicializar conexiones al arrancar la API"""
-    logger.info("Iniciando API de ML Time Series...")
-    try:
-        await mongo_client.connect()
-        logger.info("Conexión a MongoDB establecida")
-    except Exception as e:
-        logger.error(f"Error conectando a MongoDB: {e}")
+    """Inicializar conexiones al arrancar"""
+    max_retries = 5
+    retry_delay = 10  # segundos
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Intento de conexión MongoDB #{attempt + 1}/{max_retries}")
+            await mongo_client.connect()
+            logger.info("✅ Conexión MongoDB exitosa")
+            return
+            
+        except Exception as e:
+            logger.error(f"❌ Intento #{attempt + 1} falló: {e}")
+            
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ Esperando {retry_delay}s antes del siguiente intento...")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error("❌ Todos los intentos de conexión fallaron")
+                # No lanzar excepción para permitir que la API arranque
+                logger.warning("⚠️ API iniciada sin conexión MongoDB")
 
 @app.on_event("shutdown")
 async def shutdown_event():
