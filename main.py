@@ -284,14 +284,58 @@ async def predict(request: PredictionRequest):
 
 @app.get("/model/info")
 async def get_model_info():
-    """Obtener información de todos los modelos"""
+    """Obtener información detallada de todos los modelos"""
+    trained_models = sum(1 for model in models.values() if model.is_trained)
+    total_models = len(models)
+    
+    model_details = {}
+    for param, model in models.items():
+        if model.is_trained:
+            metrics = model.get_metrics()
+            parameters = model.get_parameters()
+            
+            model_details[param] = {
+                "status": "trained",
+                "performance": {
+                    "rmse": metrics.get("rmse", "N/A"),
+                    "mae": metrics.get("mae", "N/A"),
+                    "mse": metrics.get("mse", "N/A"),
+                    "final_loss": metrics.get("final_loss", "N/A")
+                },
+                "training_info": {
+                    "epochs_trained": metrics.get("epochs_trained", "N/A"),
+                    "window_size": metrics.get("window_size", "N/A"),
+                    "training_samples": metrics.get("training_samples", "N/A")
+                },
+                "model_config": {
+                    "learning_rate": parameters.get("learning_rate", "N/A"),
+                    "n_weights": parameters.get("n_weights", "N/A"),
+                    "bias": parameters.get("bias", "N/A")
+                },
+                "ready_for_prediction": True
+            }
+        else:
+            model_details[param] = {
+                "status": "not_trained",
+                "performance": None,
+                "training_info": None,
+                "model_config": None,
+                "ready_for_prediction": False
+            }
+    
     return {
-        "models": {
-            param: {
-                "is_trained": model.is_trained,
-                "metrics": model.get_metrics(),
-                "parameters": model.get_parameters()
-            } for param, model in models.items()
+        "overview": {
+            "total_models": total_models,
+            "trained_models": trained_models,
+            "untrained_models": total_models - trained_models,
+            "readiness_percentage": round((trained_models / total_models) * 100, 1),
+            "all_models_ready": trained_models == total_models
+        },
+        "model_details": model_details,
+        "api_status": {
+            "prediction_available": trained_models > 0,
+            "full_prediction_available": trained_models == total_models,
+            "timestamp": datetime.now().isoformat()
         }
     }
 
@@ -393,27 +437,55 @@ async def train_all_parameters(request: TrainAllRequest):
         parameters = ["temperatura", "ph", "oxigeno"]  # Parámetros de tu sistema
         
         for parameter in parameters:
+            param_start_time = time.time()
             try:
                 if parameter in all_data and len(all_data[parameter]) >= 5:
                     logger.info(f"Entrenando modelo para {parameter} con {len(all_data[parameter])} registros")
                     
+                    # Obtener estadísticas de los datos antes del entrenamiento
+                    values = [float(item['value']) for item in all_data[parameter]]
+                    data_stats = {
+                        "count": len(values),
+                        "min": round(min(values), 2),
+                        "max": round(max(values), 2), 
+                        "mean": round(sum(values) / len(values), 2),
+                        "std": round(np.std(values), 2)
+                    }
+                    
+                    # Entrenar modelo
                     metrics = models[parameter].train(
                         data=all_data[parameter],
                         window_size=request.window_size,
                         epochs=request.epochs
                     )
                     
+                    param_training_time = round(time.time() - param_start_time, 2)
+                    
                     results[parameter] = {
                         "success": True,
-                        "data_points": len(all_data[parameter]),
-                        "final_metrics": metrics,
-                        "training_time": round(time.time() - start_time, 2)
+                        "data_stats": data_stats,
+                        "training_config": {
+                            "window_size": request.window_size,
+                            "epochs": request.epochs,
+                            "sequences_created": metrics.get("training_samples", 0)
+                        },
+                        "performance_metrics": {
+                            "mae": metrics.get("mae", 0),
+                            "mse": metrics.get("mse", 0), 
+                            "rmse": metrics.get("rmse", 0),
+                            "final_loss": metrics.get("final_loss", 0)
+                        },
+                        "training_time_seconds": param_training_time,
+                        "model_status": "trained_successfully",
+                        "timestamp": datetime.now().isoformat()
                     }
                 else:
                     results[parameter] = {
                         "success": False,
                         "error": f"Datos insuficientes: {len(all_data.get(parameter, []))} < 5 requeridos",
-                        "data_points": len(all_data.get(parameter, []))
+                        "data_points": len(all_data.get(parameter, [])),
+                        "model_status": "not_trained",
+                        "timestamp": datetime.now().isoformat()
                     }
                     
             except Exception as e:
@@ -424,13 +496,42 @@ async def train_all_parameters(request: TrainAllRequest):
         
         total_time = round(time.time() - start_time, 2)
         successful_trainings = sum(1 for r in results.values() if r.get("success"))
+        failed_trainings = len(parameters) - successful_trainings
+        
+        # Calcular estadísticas agregadas de rendimiento
+        successful_results = [r for r in results.values() if r.get("success")]
+        if successful_results:
+            avg_rmse = round(np.mean([r["performance_metrics"]["rmse"] for r in successful_results]), 4)
+            best_rmse = round(min([r["performance_metrics"]["rmse"] for r in successful_results]), 4)
+            worst_rmse = round(max([r["performance_metrics"]["rmse"] for r in successful_results]), 4)
+        else:
+            avg_rmse = best_rmse = worst_rmse = None
         
         return {
+            "status": "completed",
             "message": f"Entrenamiento completado: {successful_trainings}/{len(parameters)} modelos exitosos",
-            "results": results,
-            "total_training_time": total_time,
-            "collection_used": request.collection_name,
-            "total_parameters": len(parameters)
+            "summary": {
+                "successful_models": successful_trainings,
+                "failed_models": failed_trainings,
+                "total_models": len(parameters),
+                "success_rate": round((successful_trainings / len(parameters)) * 100, 1),
+                "collection_used": request.collection_name,
+                "total_training_time": total_time,
+                "avg_training_time_per_model": round(total_time / len(parameters), 2)
+            },
+            "performance_overview": {
+                "average_rmse": avg_rmse,
+                "best_rmse": best_rmse,
+                "worst_rmse": worst_rmse,
+                "models_ready_for_prediction": successful_trainings
+            },
+            "detailed_results": results,
+            "training_config": {
+                "window_size": request.window_size,
+                "epochs": request.epochs,
+                "limit": request.limit
+            },
+            "timestamp": datetime.now().isoformat()
         }
         
     except HTTPException:
@@ -488,19 +589,57 @@ async def predict_all_parameters(request: PredictAllRequest):
                     return_confidence=True
                 )
                 
+                # Estadísticas de los datos usados
                 current_avg = sum(values) / len(values)
+                current_min = min(values)
+                current_max = max(values)
+                current_std = np.std(values)
+                
+                # Análisis de tendencia
                 trend = "up" if prediction > values[-1] else "down" if prediction < values[-1] else "stable"
                 change = round(prediction - values[-1], 2)
+                change_percent = round((change / values[-1]) * 100, 2) if values[-1] != 0 else 0
+                
+                # Obtener métricas del modelo
+                model_metrics = models[parameter].get_metrics()
+                
+                # Calcular volatilidad (desviación estándar de los últimos valores)
+                volatility = "high" if current_std > current_avg * 0.1 else "medium" if current_std > current_avg * 0.05 else "low"
                 
                 predictions[parameter] = {
                     "success": True,
-                    "prediction": round(float(prediction), 2),
-                    "confidence": round(float(confidence), 3),
-                    "current_avg": round(current_avg, 2),
-                    "latest_value": values[-1],
-                    "trend": trend,
-                    "change": change,
-                    "data_points_used": len(values)
+                    "prediction": {
+                        "value": round(float(prediction), 2),
+                        "confidence": round(float(confidence), 3),
+                        "confidence_level": "high" if confidence > 0.8 else "medium" if confidence > 0.6 else "low"
+                    },
+                    "trend_analysis": {
+                        "direction": trend,
+                        "change": change,
+                        "change_percent": change_percent,
+                        "volatility": volatility
+                    },
+                    "data_analysis": {
+                        "values_used": values,
+                        "data_points": len(values),
+                        "current_avg": round(current_avg, 2),
+                        "current_min": round(current_min, 2),
+                        "current_max": round(current_max, 2),
+                        "current_std": round(current_std, 2),
+                        "latest_value": values[-1],
+                        "oldest_value": values[0],
+                        "data_range": round(current_max - current_min, 2)
+                    },
+                    "model_performance": {
+                        "rmse": model_metrics.get("rmse", "N/A"),
+                        "mae": model_metrics.get("mae", "N/A"),
+                        "mse": model_metrics.get("mse", "N/A"),
+                        "training_samples": model_metrics.get("training_samples", "N/A")
+                    },
+                    "timestamps": {
+                        "oldest": str(prediction_data[0]['timestamp']),
+                        "newest": str(prediction_data[-1]['timestamp'])
+                    }
                 }
                 
             except Exception as e:
@@ -511,14 +650,52 @@ async def predict_all_parameters(request: PredictAllRequest):
                 }
         
         successful_predictions = sum(1 for p in predictions.values() if p.get("success"))
+        failed_predictions = len(parameters) - successful_predictions
+        
+        # Calcular estadísticas generales de las predicciones exitosas
+        successful_preds = [p for p in predictions.values() if p.get("success")]
+        if successful_preds:
+            avg_confidence = round(np.mean([p["prediction"]["confidence"] for p in successful_preds]), 3)
+            min_confidence = round(min([p["prediction"]["confidence"] for p in successful_preds]), 3)
+            max_confidence = round(max([p["prediction"]["confidence"] for p in successful_preds]), 3)
+            
+            # Análisis de tendencias
+            trends = [p["trend_analysis"]["direction"] for p in successful_preds]
+            trend_summary = {
+                "up": trends.count("up"),
+                "down": trends.count("down"), 
+                "stable": trends.count("stable")
+            }
+        else:
+            avg_confidence = min_confidence = max_confidence = None
+            trend_summary = {"up": 0, "down": 0, "stable": 0}
         
         return {
+            "status": "completed",
             "predictions": predictions,
             "summary": {
-                "successful": successful_predictions,
-                "total": len(parameters),
-                "collection_used": request.collection_name,
-                "timestamp": datetime.now().isoformat()
+                "prediction_results": {
+                    "successful": successful_predictions,
+                    "failed": failed_predictions,
+                    "total": len(parameters),
+                    "success_rate": round((successful_predictions / len(parameters)) * 100, 1)
+                },
+                "confidence_analysis": {
+                    "average": avg_confidence,
+                    "minimum": min_confidence,
+                    "maximum": max_confidence
+                },
+                "trend_overview": trend_summary,
+                "data_source": {
+                    "collection_used": request.collection_name,
+                    "window_size": 5,
+                    "prediction_timestamp": datetime.now().isoformat()
+                }
+            },
+            "next_actions": {
+                "retrain_needed": failed_predictions > 0,
+                "models_to_retrain": [param for param, pred in predictions.items() if not pred.get("success")],
+                "ready_for_monitoring": successful_predictions > 0
             }
         }
         
