@@ -5,6 +5,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import pickle
 import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -247,3 +248,124 @@ class PerceptronTimeSeries:
         self.is_trained = False
         self.training_metrics = {}
         logger.info("Modelo reiniciado")
+
+class PerceptronTimeSeriesModel:
+    def __init__(self):
+        self.models = {}  # Diccionario para múltiples parámetros
+        self.scalers = {}  # Scaler por parámetro
+        self.is_trained = {}  # Estado por parámetro
+        self.training_history = {}  # Historial por parámetro
+        
+    def train(self, data: List[Dict], window_size: int = 10, epochs: int = 100, parameter: str = "default"):
+        """
+        Entrenar modelo para un parámetro específico
+        
+        Args:
+            data: Lista de diccionarios con timestamp y value
+            window_size: Tamaño de la ventana de predicción
+            epochs: Número de épocas de entrenamiento
+            parameter: Nombre del parámetro (temperatura, ph, oxigeno)
+        """
+        try:
+            if len(data) < window_size + 1:
+                raise ValueError(f"Se necesitan al menos {window_size + 1} puntos de datos para window_size={window_size}")
+            
+            # Preparar datos
+            values = [float(item['value']) for item in data]
+            
+            # Normalizar datos específicos para este parámetro
+            if parameter not in self.scalers:
+                self.scalers[parameter] = StandardScaler()
+            
+            values_scaled = self.scalers[parameter].fit_transform(np.array(values).reshape(-1, 1)).flatten()
+            
+            # Crear ventanas de entrenamiento
+            X, y = self._create_windows(values_scaled, window_size)
+            
+            # Inicializar modelo para este parámetro
+            self.models[parameter] = Perceptron(random_state=42, max_iter=epochs)
+            
+            # Entrenar
+            self.models[parameter].fit(X, y)
+            
+            # Predecir para calcular métricas
+            predictions = self.models[parameter].predict(X)
+            
+            # Desnormalizar para métricas reales
+            y_real = self.scalers[parameter].inverse_transform(y.reshape(-1, 1)).flatten()
+            pred_real = self.scalers[parameter].inverse_transform(predictions.reshape(-1, 1)).flatten()
+            
+            # Calcular métricas
+            mae = mean_absolute_error(y_real, pred_real)
+            mse = mean_squared_error(y_real, pred_real) 
+            rmse = np.sqrt(mse)
+            
+            # Guardar estado
+            self.is_trained[parameter] = True
+            self.training_history[parameter] = {
+                'window_size': window_size,
+                'epochs': epochs,
+                'data_points': len(data),
+                'mae': float(mae),
+                'mse': float(mse), 
+                'rmse': float(rmse),
+                'trained_at': datetime.now().isoformat()
+            }
+            
+            logger.info(f"Modelo {parameter} entrenado - MAE: {mae:.4f}, RMSE: {rmse:.4f}")
+            
+            return {
+                'mae': float(mae),
+                'mse': float(mse),
+                'rmse': float(rmse)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error entrenando modelo {parameter}: {str(e)}")
+            raise
+
+    def predict(self, data: List[Dict], window_size: int, parameter: str = "default"):
+        """
+        Hacer predicción para un parámetro específico
+        """
+        if parameter not in self.models or not self.is_trained.get(parameter, False):
+            raise ValueError(f"El modelo para '{parameter}' no ha sido entrenado")
+        
+        if len(data) != window_size:
+            raise ValueError(f"Se requieren exactamente {window_size} puntos de datos")
+        
+        try:
+            # Preparar datos
+            values = [float(item['value']) for item in data]
+            
+            # Normalizar con el scaler específico
+            values_scaled = self.scalers[parameter].transform(np.array(values).reshape(-1, 1)).flatten()
+            
+            # Hacer predicción
+            prediction_scaled = self.models[parameter].predict([values_scaled])[0]
+            
+            # Desnormalizar
+            prediction = self.scalers[parameter].inverse_transform([[prediction_scaled]])[0][0]
+            
+            return float(prediction)
+            
+        except Exception as e:
+            logger.error(f"Error prediciendo {parameter}: {str(e)}")
+            raise
+
+    def get_info(self):
+        """Información de todos los modelos"""
+        return {
+            'model_type': 'Perceptron',
+            'parameters_trained': list(self.is_trained.keys()),
+            'is_trained': any(self.is_trained.values()),
+            'training_history': self.training_history
+        }
+
+    def reset(self):
+        """Reiniciar todos los modelos"""
+        self.models.clear()
+        self.scalers.clear() 
+        self.is_trained.clear()
+        self.training_history.clear()
+        logger.info("Todos los modelos reiniciados")
