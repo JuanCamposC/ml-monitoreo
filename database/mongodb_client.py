@@ -94,7 +94,7 @@ class MongoDBClient:
         limit: Optional[int] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-        sort_field: str = "fecha"
+        sort_field: str = "_id"  # Ordenar por _id que es cronológico (los ObjectId contienen timestamp)
     ) -> List[Dict]:
         """
         Obtener datos de series de tiempo de una colección para un parámetro específico.
@@ -105,7 +105,7 @@ class MongoDBClient:
             limit: Límite máximo de documentos a retornar
             start_date: Fecha inicial para filtrar
             end_date: Fecha final para filtrar
-            sort_field: Campo por el cual ordenar (por defecto fecha)
+            sort_field: Campo por el cual ordenar (por defecto _id para orden cronológico)
             
         Returns:
             Lista de documentos transformados con timestamp y value

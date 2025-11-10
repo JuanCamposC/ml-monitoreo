@@ -383,6 +383,35 @@ async def test_database_connection():
         logger.error(f"Error en test de base de datos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/data/raw/{collection_name}")
+async def get_raw_mongodb_data(collection_name: str, limit: int = 5):
+    """Ver documentos RAW directos de MongoDB incluyendo el campo fecha original"""
+    try:
+        if mongo_client.database is None:
+            raise HTTPException(status_code=500, detail="No hay conexión a la base de datos")
+        
+        collection = mongo_client.database[collection_name]
+        
+        # Obtener por fecha descendente
+        docs_fecha = await collection.find().sort('fecha', -1).limit(limit).to_list(length=limit)
+        # Obtener por _id descendente
+        docs_id = await collection.find().sort('_id', -1).limit(limit).to_list(length=limit)
+        
+        # Convertir ObjectId a string para JSON
+        for doc in docs_fecha:
+            doc['_id'] = str(doc['_id'])
+        for doc in docs_id:
+            doc['_id'] = str(doc['_id'])
+        
+        return {
+            "sorted_by_fecha_desc": docs_fecha,
+            "sorted_by_id_desc": docs_id,
+            "note": "Muestra documentos RAW de MongoDB con ambos ordenamientos"
+        }
+    except Exception as e:
+        logger.error(f"Error obteniendo datos raw: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/data/sample/{collection_name}")
 async def get_sample_data(collection_name: str, limit: int = 10):
     """Obtener muestra de los últimos 10 datos (exactamente los que usa para entrenamiento)"""
