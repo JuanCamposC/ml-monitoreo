@@ -159,10 +159,10 @@ async def train_model(request: TrainingRequest):
         if not data:
             raise HTTPException(status_code=404, detail="No se encontraron datos")
         
-        if len(data) < 5:  # Mínimo requerido para entrenamiento
+        if len(data) < 10:  # Mínimo requerido para entrenamiento
             raise HTTPException(
                 status_code=400, 
-                detail=f"Se necesitan al menos 5 registros para entrenar. Encontrados: {len(data)}"
+                detail=f"Se necesitan al menos 10 registros para entrenar. Encontrados: {len(data)}"
             )
         
         logger.info(f"Datos obtenidos: {len(data)} registros")
@@ -198,7 +198,7 @@ async def predict(request: PredictionRequest):
     Request: {
         "parameter": "temperatura",
         "collection_name": "datos",
-        "window_size": 5 (opcional)
+        "window_size": 10 (opcional)
     }
     """
     try:
@@ -217,7 +217,7 @@ async def predict(request: PredictionRequest):
             )
         
         # Determinar window_size (usar el del entrenamiento si no se especifica)
-        window_size = request.window_size if request.window_size else 5
+        window_size = request.window_size if request.window_size else 10
         
         logger.info(f"Obteniendo últimos {window_size} registros para {request.parameter}")
         
@@ -408,9 +408,10 @@ async def get_sample_data(collection_name: str, limit: int = 10):
             "sample_size": training_limit,
             "data": sample_data,
             "total_records": {param: len(data) for param, data in sample_data.items()},
-            "note": "Estos son exactamente los últimos 10 datos que usa el entrenamiento",
+            "note": "Estos son exactamente los últimos 10 datos que usa el entrenamiento (mínimo requerido: 10)",
             "training_info": {
                 "data_used_for_training": training_limit,
+                "minimum_data_required": 10,
                 "window_size_default": 5,
                 "sequences_created_per_param": max(0, training_limit - 5)
             }
@@ -448,7 +449,7 @@ async def train_all_parameters(request: TrainAllRequest):
         for parameter in parameters:
             param_start_time = time.time()
             try:
-                if parameter in all_data and len(all_data[parameter]) >= 5:
+                if parameter in all_data and len(all_data[parameter]) >= 10:
                     logger.info(f"Entrenando modelo para {parameter} con {len(all_data[parameter])} registros")
                     
                     # Obtener estadísticas de los datos antes del entrenamiento
@@ -493,7 +494,7 @@ async def train_all_parameters(request: TrainAllRequest):
                 else:
                     results[parameter] = {
                         "success": False,
-                        "error": f"Datos insuficientes: {len(all_data.get(parameter, []))} < 5 requeridos",
+                        "error": f"Datos insuficientes: {len(all_data.get(parameter, []))} < 10 requeridos",
                         "data_points": len(all_data.get(parameter, [])),
                         "model_status": "not_trained",
                         "timestamp": datetime.now().isoformat()
