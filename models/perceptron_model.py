@@ -11,25 +11,77 @@ logger = logging.getLogger(__name__)
 
 class PerceptronTimeSeries:
     """
-    Modelo Perceptrón optimizado para análisis de series de tiempo.
+    Modelo Perceptrón MULTIVARIABLE optimizado para análisis de series de tiempo.
+    Considera las 3 variables (temperatura, pH, oxígeno) simultáneamente para predicciones.
     Incluye preprocesamiento automático y métricas de evaluación.
     """
     
-    def __init__(self, learning_rate: float = 0.01, random_state: int = 42):
+    def __init__(self, learning_rate: float = 0.01, random_state: int = 42, target_parameter: str = "temperatura"):
         self.learning_rate = learning_rate
         self.random_state = random_state
+        self.target_parameter = target_parameter  # Parámetro que queremos predecir
         self.weights = None
         self.bias = None
-        self.scaler = StandardScaler()
+        self.scaler = StandardScaler()  # Escala todas las variables juntas
         self.is_trained = False
         self.training_metrics = {}
         
         # Configurar semilla para reproducibilidad
         np.random.seed(random_state)
     
+    def _create_multivariate_sequences(self, all_data: Dict[str, List[Dict]], window_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Crear secuencias MULTIVARIABLES para entrenamiento.
+        Usa las 3 variables (temperatura, pH, oxígeno) como entrada para predecir el target.
+        
+        Args:
+            all_data: Diccionario con 'temperatura', 'ph', 'oxigeno', cada uno con lista de {'timestamp', 'value'}
+            window_size: Tamaño de la ventana deslizante
+            
+        Returns:
+            Tupla (X, y) donde:
+            - X: matriz de forma (samples, window_size * 3) con todas las variables
+            - y: vector con valores objetivo del parámetro target
+        """
+        # Extraer y ordenar valores de cada parámetro
+        params = ['temperatura', 'ph', 'oxigeno']
+        values_by_param = {}
+        
+        for param in params:
+            if param not in all_data:
+                raise ValueError(f"Falta el parámetro '{param}' en los datos")
+            
+            sorted_data = sorted(all_data[param], key=lambda x: x.get('timestamp', 0))
+            values_by_param[param] = [float(item['value']) for item in sorted_data]
+        
+        # Verificar que todos tengan la misma longitud
+        data_length = len(values_by_param['temperatura'])
+        for param in params:
+            if len(values_by_param[param]) != data_length:
+                raise ValueError(f"Todos los parámetros deben tener la misma cantidad de datos")
+        
+        if data_length <= window_size:
+            raise ValueError(f"Los datos deben tener más de {window_size} puntos")
+        
+        X, y = [], []
+        
+        # Crear secuencias multivariables
+        for i in range(data_length - window_size):
+            # Para cada ventana, concatenar las 3 variables
+            window_features = []
+            for param in params:
+                window_features.extend(values_by_param[param][i:i + window_size])
+            
+            X.append(window_features)
+            # y es el siguiente valor del parámetro objetivo
+            y.append(values_by_param[self.target_parameter][i + window_size])
+        
+        return np.array(X), np.array(y)
+    
     def _create_sequences(self, data: List[float], window_size: int) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Crear secuencias de entrada y salida para entrenamiento de series de tiempo.
+        Crear secuencias de entrada y salida para entrenamiento de series de tiempo (univariable).
+        DEPRECADO: Se mantiene por compatibilidad, pero usa _create_multivariate_sequences cuando sea posible.
         
         Args:
             data: Lista de valores de la serie de tiempo
@@ -56,44 +108,41 @@ class PerceptronTimeSeries:
         """Paso hacia adelante del perceptrón"""
         return self._activation_function(np.dot(X, self.weights) + self.bias)
     
-    def train(self, data: List[Dict], window_size: int = 10, epochs: int = 100) -> Dict:
+    def train(self, data: Union[List[Dict], Dict[str, List[Dict]]], window_size: int = 10, epochs: int = 100, multivariate: bool = True) -> Dict:
         """
         Entrenar el modelo Perceptrón con datos de series de tiempo.
         
         Args:
-            data: Lista de documentos con campos 'timestamp' y 'value'
+            data: Si multivariate=True: Dict con {'temperatura': [...], 'ph': [...], 'oxigeno': [...]}
+                  Si multivariate=False: Lista de documentos con campos 'timestamp' y 'value'
             window_size: Tamaño de la ventana deslizante
             epochs: Número de épocas de entrenamiento
+            multivariate: Si True, usa las 3 variables para predecir (RECOMENDADO)
             
         Returns:
             Diccionario con métricas del entrenamiento
         """
         try:
-            logger.info(f"Iniciando entrenamiento con {len(data)} puntos de datos")
+            logger.info(f"Iniciando entrenamiento {'MULTIVARIABLE' if multivariate else 'univariable'} para {self.target_parameter}")
             
-            # Extraer valores y ordenar por timestamp
-            # Manejar diferentes tipos de timestamp (datetime, int, str)
-            def get_sort_key(item):
-                ts = item.get('timestamp')
-                if ts is not None:
-                    if isinstance(ts, str):
-                        try:
-                            return int(ts)
-                        except:
-                            return 0
-                    return ts
-                # Si no hay timestamp, usar el _id como fallback
-                id_val = item.get('_id', '0')
-                if isinstance(id_val, str):
-                    return 0  # Para ObjectIds como string, usar 0 como fallback
-                return id_val
-            
-            sorted_data = sorted(data, key=get_sort_key)
-            values = [float(item['value']) for item in sorted_data]
-            
-            # Crear secuencias
-            X, y = self._create_sequences(values, window_size)
-            logger.info(f"Creadas {len(X)} secuencias de entrenamiento")
+            if multivariate:
+                # Entrenamiento MULTIVARIABLE (usa las 3 variables)
+                if not isinstance(data, dict):
+                    raise ValueError("Para entrenamiento multivariable, 'data' debe ser un diccionario con temperatura, ph, oxigeno")
+                
+                # Crear secuencias multivariables
+                X, y = self._create_multivariate_sequences(data, window_size)
+                logger.info(f"Creadas {len(X)} secuencias multivariables (window_size={window_size}, 3 variables = {window_size*3} features)")
+                
+            else:
+                # Entrenamiento UNIVARIABLE (solo una variable)
+                if not isinstance(data, list):
+                    raise ValueError("Para entrenamiento univariable, 'data' debe ser una lista")
+                
+                sorted_data = sorted(data, key=lambda x: x.get('timestamp', 0))
+                values = [float(item['value']) for item in sorted_data]
+                X, y = self._create_sequences(values, window_size)
+                logger.info(f"Creadas {len(X)} secuencias univariables")
             
             # Normalizar datos
             X_scaled = self.scaler.fit_transform(X)
@@ -103,7 +152,7 @@ class PerceptronTimeSeries:
             self.weights = np.random.normal(0, 0.01, n_features)
             self.bias = 0.0
             
-            # Entrenamiento
+            # Entrenamiento con gradiente descendente
             losses = []
             for epoch in range(epochs):
                 # Forward pass
@@ -139,11 +188,13 @@ class PerceptronTimeSeries:
                 'final_loss': float(losses[-1]),
                 'epochs_trained': epochs,
                 'window_size': window_size,
-                'training_samples': len(X)
+                'training_samples': len(X),
+                'n_features': n_features,
+                'multivariate': multivariate
             }
             
             self.is_trained = True
-            logger.info(f"Entrenamiento completado. RMSE: {rmse:.4f}")
+            logger.info(f"✅ Entrenamiento completado para {self.target_parameter}. RMSE: {rmse:.4f}, Features: {n_features}")
             
             return self.training_metrics
             
@@ -151,13 +202,15 @@ class PerceptronTimeSeries:
             logger.error(f"Error durante entrenamiento: {e}")
             raise
     
-    def predict(self, sequence: List[float], return_confidence: bool = False) -> Union[float, Tuple[float, float]]:
+    def predict(self, sequence: Union[List[float], Dict[str, List[float]]], return_confidence: bool = False, multivariate: bool = True) -> Union[float, Tuple[float, float]]:
         """
         Hacer predicción para una secuencia de valores.
         
         Args:
-            sequence: Lista de valores de entrada
+            sequence: Si multivariate=True: Dict con {'temperatura': [...], 'ph': [...], 'oxigeno': [...]}
+                     Si multivariate=False: Lista de valores
             return_confidence: Si retornar también la confianza
+            multivariate: Si True, espera las 3 variables (debe coincidir con el entrenamiento)
             
         Returns:
             Predicción o tupla (predicción, confianza)
@@ -165,18 +218,36 @@ class PerceptronTimeSeries:
         if not self.is_trained:
             raise ValueError("El modelo debe ser entrenado antes de hacer predicciones")
         
-        if len(sequence) != len(self.weights):
-            raise ValueError(f"La secuencia debe tener {len(self.weights)} valores")
+        # Preparar datos según el modo
+        if multivariate:
+            if not isinstance(sequence, dict):
+                raise ValueError("Para predicción multivariable, 'sequence' debe ser un diccionario")
+            
+            # Concatenar las 3 variables en el orden correcto
+            params = ['temperatura', 'ph', 'oxigeno']
+            combined_sequence = []
+            for param in params:
+                if param not in sequence:
+                    raise ValueError(f"Falta el parámetro '{param}' en la secuencia")
+                combined_sequence.extend(sequence[param])
+            
+            sequence_array = np.array(combined_sequence).reshape(1, -1)
+        else:
+            if not isinstance(sequence, list):
+                raise ValueError("Para predicción univariable, 'sequence' debe ser una lista")
+            sequence_array = np.array(sequence).reshape(1, -1)
+        
+        if sequence_array.shape[1] != len(self.weights):
+            raise ValueError(f"La secuencia debe tener {len(self.weights)} valores, pero tiene {sequence_array.shape[1]}")
         
         # Normalizar entrada
-        sequence_array = np.array(sequence).reshape(1, -1)
         sequence_scaled = self.scaler.transform(sequence_array)
         
         # Hacer predicción
         prediction = self._forward_pass(sequence_scaled)[0]
         
         if return_confidence:
-            # Confianza simple basada en la varianza de los pesos
+            # Confianza basada en la varianza de los pesos
             confidence = 1.0 / (1.0 + np.std(self.weights))
             return float(prediction), float(confidence)
         

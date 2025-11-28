@@ -38,11 +38,12 @@ app.add_middleware(
 # Inicializar componentes
 mongo_client = MongoDBClient()
 
-# Modelos separados para cada parámetro
+# Modelos MULTIVARIABLES separados para cada parámetro objetivo
+# Cada modelo usa las 3 variables (temperatura, pH, oxígeno) para predecir su target
 models = {
-    'temperatura': PerceptronTimeSeries(),
-    'ph': PerceptronTimeSeries(),
-    'oxigeno': PerceptronTimeSeries()
+    'temperatura': PerceptronTimeSeries(target_parameter='temperatura'),
+    'ph': PerceptronTimeSeries(target_parameter='ph'),
+    'oxigeno': PerceptronTimeSeries(target_parameter='oxigeno')
 }
 
 # Modelos Pydantic para request/response
@@ -193,10 +194,10 @@ async def train_model(request: TrainingRequest):
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest):
     """
-    Hacer predicción automática: La API obtiene los datos de MongoDB
+    Hacer predicción MULTIVARIABLE automática: usa las 3 variables (temperatura, pH, oxígeno) para predecir
     
     Request: {
-        "parameter": "temperatura",
+        "parameter": "temperatura",  # Parámetro a predecir
         "collection_name": "datos",
         "window_size": 10 (opcional)
     }
@@ -217,61 +218,73 @@ async def predict(request: PredictionRequest):
             )
         
         # Determinar window_size (usar el del entrenamiento si no se especifica)
-        window_size = request.window_size if request.window_size else 10
+        window_size = request.window_size if request.window_size else 5
         
-        logger.info(f"Obteniendo últimos {window_size} registros para {request.parameter}")
+        logger.info(f"Obteniendo últimos {window_size} registros de TODAS las variables para predecir {request.parameter}")
         
-        # Obtener automáticamente los últimos datos de MongoDB
-        recent_data = await mongo_client.get_time_series_data(
+        # Obtener datos de las 3 variables para predicción multivariable
+        all_recent_data = await mongo_client.get_all_parameters_data(
             collection_name=request.collection_name,
-            parameter=request.parameter,
-            limit=window_size * 2  # Obtener más datos para asegurar que tenemos suficientes
+            limit=window_size
         )
         
-        if not recent_data:
+        if not all_recent_data:
             raise HTTPException(
                 status_code=404,
-                detail=f"No se encontraron datos para {request.parameter} en {request.collection_name}"
+                detail=f"No se encontraron datos en {request.collection_name}"
             )
         
-        if len(recent_data) < window_size:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Se necesitan {window_size} registros, solo se encontraron {len(recent_data)}"
-            )
+        # Verificar que tengamos suficientes datos de cada variable
+        required_params = ["temperatura", "ph", "oxigeno"]
+        for param in required_params:
+            if param not in all_recent_data or len(all_recent_data[param]) < window_size:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Se necesitan {window_size} registros de {param}, solo se encontraron {len(all_recent_data.get(param, []))}"
+                )
         
-        # Tomar exactamente los últimos window_size registros
-        prediction_data = recent_data[-window_size:]
+        logger.info(f"Usando datos multivariables: {window_size} registros de cada variable")
         
-        logger.info(f"Usando {len(prediction_data)} registros para predicción de {request.parameter}")
+        # Preparar datos para predicción multivariable
+        multivariate_sequence = {
+            'temperatura': [float(item['value']) for item in all_recent_data['temperatura']],
+            'ph': [float(item['value']) for item in all_recent_data['ph']],
+            'oxigeno': [float(item['value']) for item in all_recent_data['oxigeno']]
+        }
         
-        # Hacer predicción
-        values = [float(item['value']) for item in prediction_data]
-        
+        # Hacer predicción multivariable
         prediction, confidence = models[request.parameter].predict(
-            values,
-            return_confidence=True
+            multivariate_sequence,
+            return_confidence=True,
+            multivariate=True
         )
         
-        # Calcular estadísticas de los datos usados
-        values_used = [item['value'] for item in prediction_data]
+        # Estadísticas del parámetro objetivo
+        target_values = multivariate_sequence[request.parameter]
         
         return PredictionResponse(
             prediction=round(float(prediction), 2),
             parameter=request.parameter,
             confidence=round(float(confidence), 3),
             data_used={
-                "count": len(prediction_data),
-                "values": values_used,
-                "avg": round(sum(values_used) / len(values_used), 2),
-                "min": min(values_used),
-                "max": max(values_used),
-                "latest_timestamp": str(prediction_data[-1]['timestamp']),
-                "oldest_timestamp": str(prediction_data[0]['timestamp'])
+                "count": len(target_values),
+                "values": target_values,
+                "avg": round(sum(target_values) / len(target_values), 2),
+                "min": min(target_values),
+                "max": max(target_values),
+                "latest_timestamp": str(all_recent_data[request.parameter][-1]['timestamp']),
+                "oldest_timestamp": str(all_recent_data[request.parameter][0]['timestamp']),
+                "multivariate_info": {
+                    "uses_all_variables": True,
+                    "temperatura_range": f"{min(multivariate_sequence['temperatura']):.2f} - {max(multivariate_sequence['temperatura']):.2f}",
+                    "ph_range": f"{min(multivariate_sequence['ph']):.2f} - {max(multivariate_sequence['ph']):.2f}",
+                    "oxigeno_range": f"{min(multivariate_sequence['oxigeno']):.2f} - {max(multivariate_sequence['oxigeno']):.2f}"
+                }
             },
             model_info={
                 "window_size": window_size,
-                "metrics": models[request.parameter].get_metrics()
+                "metrics": models[request.parameter].get_metrics(),
+                "model_type": "Multivariable (usa temperatura + pH + oxígeno)"
             },
             timestamp=datetime.now().isoformat()
         )
@@ -279,7 +292,7 @@ async def predict(request: PredictionRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error durante predicción automática: {str(e)}")
+        logger.error(f"Error durante predicción multivariable: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error en predicción: {str(e)}")
 
 @app.get("/model/info")
@@ -452,7 +465,7 @@ async def get_sample_data(collection_name: str, limit: int = 10):
 
 @app.post("/train/all-parameters")
 async def train_all_parameters(request: TrainAllRequest):
-    """Entrenar modelos para todos los parámetros disponibles"""
+    """Entrenar modelos MULTIVARIABLES para todos los parámetros (usa las 3 variables para cada predicción)"""
     try:
         start_time = time.time()
         
@@ -460,7 +473,7 @@ async def train_all_parameters(request: TrainAllRequest):
         if not await mongo_client.ping():
             raise HTTPException(status_code=500, detail="No se puede conectar a MongoDB")
         
-        # Obtener solo los últimos 10 datos para entrenamiento
+        # Obtener solo los últimos 10 datos de TODAS las variables para entrenamiento multivariable
         all_data = await mongo_client.get_all_parameters_data(
             collection_name=request.collection_name,
             limit=10  # Usar solo los últimos 10 registros
@@ -472,64 +485,76 @@ async def train_all_parameters(request: TrainAllRequest):
                 detail=f"No se encontraron datos en la colección '{request.collection_name}'"
             )
         
-        results = {}
-        parameters = ["temperatura", "ph", "oxigeno"]  # Parámetros de tu sistema
+        # Verificar que tengamos datos de las 3 variables
+        parameters = ["temperatura", "ph", "oxigeno"]
+        for param in parameters:
+            if param not in all_data or len(all_data[param]) < 10:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Se requieren al menos 10 registros de cada variable. {param}: {len(all_data.get(param, []))}"
+                )
         
+        results = {}
+        
+        # Entrenar un modelo para cada parámetro objetivo (pero cada uno usa las 3 variables)
         for parameter in parameters:
             param_start_time = time.time()
             try:
-                if parameter in all_data and len(all_data[parameter]) >= 10:
-                    logger.info(f"Entrenando modelo para {parameter} con {len(all_data[parameter])} registros")
-                    
-                    # Obtener estadísticas de los datos antes del entrenamiento
-                    values = [float(item['value']) for item in all_data[parameter]]
-                    data_stats = {
-                        "count": len(values),
-                        "min": round(min(values), 2),
-                        "max": round(max(values), 2), 
-                        "mean": round(sum(values) / len(values), 2),
-                        "std": round(np.std(values), 2)
-                    }
-                    
-                    # Entrenar modelo
-                    metrics = models[parameter].train(
-                        data=all_data[parameter],
-                        window_size=request.window_size,
-                        epochs=request.epochs
-                    )
-                    
-                    param_training_time = round(time.time() - param_start_time, 2)
-                    
-                    results[parameter] = {
-                        "success": True,
-                        "data_stats": data_stats,
-                        "training_data_used": all_data[parameter],  # Mostrar exactamente qué datos usó
-                        "training_config": {
-                            "window_size": request.window_size,
-                            "epochs": request.epochs,
-                            "sequences_created": metrics.get("training_samples", 0),
-                            "limit_applied": 10
-                        },
-                        "performance_metrics": {
-                            "mae": metrics.get("mae", 0),
-                            "mse": metrics.get("mse", 0), 
-                            "rmse": metrics.get("rmse", 0),
-                            "final_loss": metrics.get("final_loss", 0)
-                        },
-                        "training_time_seconds": param_training_time,
-                        "model_status": "trained_successfully",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                else:
-                    results[parameter] = {
-                        "success": False,
-                        "error": f"Datos insuficientes: {len(all_data.get(parameter, []))} < 10 requeridos",
-                        "data_points": len(all_data.get(parameter, [])),
-                        "model_status": "not_trained",
-                        "timestamp": datetime.now().isoformat()
-                    }
+                logger.info(f"Entrenando modelo MULTIVARIABLE para predecir {parameter}")
+                logger.info(f"  Usando {len(all_data['temperatura'])} registros de temperatura")
+                logger.info(f"  Usando {len(all_data['ph'])} registros de pH")
+                logger.info(f"  Usando {len(all_data['oxigeno'])} registros de oxígeno")
+                
+                # Obtener estadísticas del parámetro objetivo
+                values = [float(item['value']) for item in all_data[parameter]]
+                data_stats = {
+                    "count": len(values),
+                    "min": round(min(values), 2),
+                    "max": round(max(values), 2), 
+                    "mean": round(sum(values) / len(values), 2),
+                    "std": round(np.std(values), 2)
+                }
+                
+                # Entrenar modelo MULTIVARIABLE (usa las 3 variables)
+                metrics = models[parameter].train(
+                    data=all_data,  # Pasar TODAS las variables
+                    window_size=request.window_size,
+                    epochs=request.epochs,
+                    multivariate=True  # Activar modo multivariable
+                )
+                
+                param_training_time = round(time.time() - param_start_time, 2)
+                
+                results[parameter] = {
+                    "success": True,
+                    "data_stats": data_stats,
+                    "training_data_used": all_data[parameter],  # Mostrar datos del target
+                    "multivariate_info": {
+                        "uses_all_variables": True,
+                        "variables": ["temperatura", "pH", "oxígeno"],
+                        "total_features": metrics.get("n_features", 0),
+                        "description": f"Modelo usa las 3 variables simultáneamente para predecir {parameter}"
+                    },
+                    "training_config": {
+                        "window_size": request.window_size,
+                        "epochs": request.epochs,
+                        "sequences_created": metrics.get("training_samples", 0),
+                        "limit_applied": 10,
+                        "multivariate": True
+                    },
+                    "performance_metrics": {
+                        "mae": metrics.get("mae", 0),
+                        "mse": metrics.get("mse", 0), 
+                        "rmse": metrics.get("rmse", 0),
+                        "final_loss": metrics.get("final_loss", 0)
+                    },
+                    "training_time_seconds": param_training_time,
+                    "model_status": "trained_successfully",
+                    "timestamp": datetime.now().isoformat()
+                }
                     
             except Exception as e:
+                logger.error(f"Error entrenando {parameter}: {e}")
                 results[parameter] = {
                     "success": False,
                     "error": str(e)
@@ -550,13 +575,14 @@ async def train_all_parameters(request: TrainAllRequest):
         
         return {
             "status": "completed",
-            "message": f"Entrenamiento completado: {successful_trainings}/{len(parameters)} modelos exitosos",
+            "message": f"Entrenamiento MULTIVARIABLE completado: {successful_trainings}/{len(parameters)} modelos exitosos",
             "summary": {
                 "successful_models": successful_trainings,
                 "failed_models": failed_trainings,
                 "total_models": len(parameters),
                 "success_rate": round((successful_trainings / len(parameters)) * 100, 1),
                 "collection_used": request.collection_name,
+                "model_type": "Multivariable Perceptron (usa temperatura + pH + oxígeno)",
                 "total_training_time": total_time,
                 "avg_training_time_per_model": round(total_time / len(parameters), 2)
             },
@@ -584,7 +610,8 @@ async def train_all_parameters(request: TrainAllRequest):
 @app.post("/predict/all")
 async def predict_all_parameters(request: PredictAllRequest):
     """
-    Predicción automática para todos los parámetros
+    Predicción MULTIVARIABLE automática para todos los parámetros.
+    Cada modelo usa las 3 variables (temperatura, pH, oxígeno) para hacer su predicción.
     
     Request: {
         "collection_name": "datos"
@@ -593,6 +620,36 @@ async def predict_all_parameters(request: PredictAllRequest):
     try:
         parameters = ["temperatura", "ph", "oxigeno"]
         predictions = {}
+        window_size = 5
+        
+        # Obtener datos de TODAS las variables una sola vez
+        all_recent_data = await mongo_client.get_all_parameters_data(
+            collection_name=request.collection_name,
+            limit=window_size
+        )
+        
+        # Verificar que tengamos datos de todas las variables
+        data_available = all(
+            param in all_recent_data and len(all_recent_data[param]) >= window_size
+            for param in parameters
+        )
+        
+        if not data_available:
+            missing_info = {
+                param: len(all_recent_data.get(param, []))
+                for param in parameters
+            }
+            raise HTTPException(
+                status_code=400,
+                detail=f"Datos insuficientes para predicción multivariable. Necesarios: {window_size}, Disponibles: {missing_info}"
+            )
+        
+        # Preparar secuencia multivariable (misma para todos los modelos)
+        multivariate_sequence = {
+            'temperatura': [float(item['value']) for item in all_recent_data['temperatura']],
+            'ph': [float(item['value']) for item in all_recent_data['ph']],
+            'oxigeno': [float(item['value']) for item in all_recent_data['oxigeno']]
+        }
         
         for parameter in parameters:
             try:
@@ -605,46 +662,29 @@ async def predict_all_parameters(request: PredictAllRequest):
                     }
                     continue
                 
-                # Obtener datos automáticamente (usando window_size por defecto de 5)
-                window_size = 5
-                recent_data = await mongo_client.get_time_series_data(
-                    collection_name=request.collection_name,
-                    parameter=parameter,
-                    limit=window_size * 2
-                )
-                
-                if len(recent_data) < window_size:
-                    predictions[parameter] = {
-                        "success": False,
-                        "error": f"Datos insuficientes: {len(recent_data)}/{window_size}",
-                        "prediction": None
-                    }
-                    continue
-                
-                # Hacer predicción
-                prediction_data = recent_data[-window_size:]
-                values = [float(item['value']) for item in prediction_data]
-                
+                # Hacer predicción multivariable
                 prediction, confidence = models[parameter].predict(
-                    values,
-                    return_confidence=True
+                    multivariate_sequence,
+                    return_confidence=True,
+                    multivariate=True
                 )
                 
-                # Estadísticas de los datos usados
-                current_avg = sum(values) / len(values)
-                current_min = min(values)
-                current_max = max(values)
-                current_std = np.std(values)
+                # Estadísticas del parámetro objetivo
+                target_values = multivariate_sequence[parameter]
+                current_avg = sum(target_values) / len(target_values)
+                current_min = min(target_values)
+                current_max = max(target_values)
+                current_std = np.std(target_values)
                 
                 # Análisis de tendencia
-                trend = "up" if prediction > values[-1] else "down" if prediction < values[-1] else "stable"
-                change = round(prediction - values[-1], 2)
-                change_percent = round((change / values[-1]) * 100, 2) if values[-1] != 0 else 0
+                trend = "up" if prediction > target_values[-1] else "down" if prediction < target_values[-1] else "stable"
+                change = round(prediction - target_values[-1], 2)
+                change_percent = round((change / target_values[-1]) * 100, 2) if target_values[-1] != 0 else 0
                 
                 # Obtener métricas del modelo
                 model_metrics = models[parameter].get_metrics()
                 
-                # Calcular volatilidad (desviación estándar de los últimos valores)
+                # Calcular volatilidad
                 volatility = "high" if current_std > current_avg * 0.1 else "medium" if current_std > current_avg * 0.05 else "low"
                 
                 predictions[parameter] = {
@@ -652,7 +692,8 @@ async def predict_all_parameters(request: PredictAllRequest):
                     "prediction": {
                         "value": round(float(prediction), 2),
                         "confidence": round(float(confidence), 3),
-                        "confidence_level": "high" if confidence > 0.8 else "medium" if confidence > 0.6 else "low"
+                        "confidence_level": "high" if confidence > 0.8 else "medium" if confidence > 0.6 else "low",
+                        "last_value": target_values[-1]
                     },
                     "trend_analysis": {
                         "direction": trend,
@@ -661,15 +702,21 @@ async def predict_all_parameters(request: PredictAllRequest):
                         "volatility": volatility
                     },
                     "data_analysis": {
-                        "values_used": values,
-                        "data_points": len(values),
+                        "values_used": target_values,
+                        "data_points": len(target_values),
                         "current_avg": round(current_avg, 2),
                         "current_min": round(current_min, 2),
                         "current_max": round(current_max, 2),
                         "current_std": round(current_std, 2),
-                        "latest_value": values[-1],
-                        "oldest_value": values[0],
+                        "latest_value": target_values[-1],
+                        "oldest_value": target_values[0],
                         "data_range": round(current_max - current_min, 2)
+                    },
+                    "multivariate_context": {
+                        "uses_all_variables": True,
+                        "temperatura": f"avg={np.mean(multivariate_sequence['temperatura']):.2f}",
+                        "ph": f"avg={np.mean(multivariate_sequence['ph']):.2f}",
+                        "oxigeno": f"avg={np.mean(multivariate_sequence['oxigeno']):.2f}"
                     },
                     "model_performance": {
                         "rmse": model_metrics.get("rmse", "N/A"),
@@ -678,12 +725,13 @@ async def predict_all_parameters(request: PredictAllRequest):
                         "training_samples": model_metrics.get("training_samples", "N/A")
                     },
                     "timestamps": {
-                        "oldest": str(prediction_data[0]['timestamp']),
-                        "newest": str(prediction_data[-1]['timestamp'])
+                        "oldest": str(all_recent_data[parameter][0]['timestamp']),
+                        "newest": str(all_recent_data[parameter][-1]['timestamp'])
                     }
                 }
                 
             except Exception as e:
+                logger.error(f"Error prediciendo {parameter}: {e}")
                 predictions[parameter] = {
                     "success": False,
                     "error": str(e),
